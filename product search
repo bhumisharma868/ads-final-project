@@ -1,0 +1,517 @@
+#!/usr/bin/env python3
+"""
+Online Shopping Product Search  --  AVL / BST based
+====================================================
+Three self-balancing AVL trees index the same product catalogue:
+
+    * id_tree     keyed by  (id,)
+    * name_tree   keyed by  (name.lower(), id)
+    * price_tree  keyed by  (price, id)
+
+Names and prices are not unique, so the product id is appended to the key as a
+tie-breaker. That keeps every key unique and gives a stable sorted order.
+
+Each tree can also run as a plain (unbalanced) BST (balanced=False). This lets
+the demo show how sorted inserts degrade a BST to O(n) height while the AVL
+stays at O(log n).
+
+Run:
+    python3 product_search.py          interactive menu
+    python3 product_search.py --demo   non-interactive walkthrough
+"""
+
+import sys
+from dataclasses import dataclass
+
+INF = float("inf")
+
+
+# --------------------------------------------------------------------------
+# Data model
+# --------------------------------------------------------------------------
+@dataclass
+class Product:
+    pid: int
+    name: str
+    price: float
+
+    def __str__(self):
+        return f"#{self.pid:<5} {self.name:<26} ${self.price:>9,.2f}"
+
+
+# --------------------------------------------------------------------------
+# AVL / BST tree
+# --------------------------------------------------------------------------
+class Node:
+    __slots__ = ("key", "value", "left", "right", "height")
+
+    def __init__(self, key, value):
+        self.key = key
+        self.value = value
+        self.left = None
+        self.right = None
+        self.height = 1
+
+
+class AVLTree:
+    def __init__(self, label, balanced=True):
+        self.label = label
+        self.balanced = balanced
+        self.root = None
+        self.size = 0
+        self.rotations = {"left": 0, "right": 0}
+
+    # ---- helpers ---------------------------------------------------------
+    @staticmethod
+    def _h(n):
+        return n.height if n else 0
+
+    def _update(self, n):
+        n.height = 1 + max(self._h(n.left), self._h(n.right))
+
+    def _bf(self, n):
+        """Balance factor = height(left) - height(right)."""
+        return self._h(n.left) - self._h(n.right) if n else 0
+
+    def _rot_right(self, y):
+        x = y.left
+        y.left, x.right = x.right, y
+        self._update(y)
+        self._update(x)
+        self.rotations["right"] += 1
+        return x
+
+    def _rot_left(self, x):
+        y = x.right
+        x.right, y.left = y.left, x
+        self._update(x)
+        self._update(y)
+        self.rotations["left"] += 1
+        return y
+
+    def _rebalance(self, n):
+        self._update(n)
+        if not self.balanced:
+            return n
+        bf = self._bf(n)
+        if bf > 1:                                  # left heavy
+            if self._bf(n.left) < 0:                # Left-Right case
+                n.left = self._rot_left(n.left)
+            return self._rot_right(n)               # Left-Left case
+        if bf < -1:                                 # right heavy
+            if self._bf(n.right) > 0:               # Right-Left case
+                n.right = self._rot_right(n.right)
+            return self._rot_left(n)                # Right-Right case
+        return n
+
+    # ---- insert ----------------------------------------------------------
+    def insert(self, key, value):
+        self.root = self._insert(self.root, key, value)
+        self.size += 1
+
+    def _insert(self, n, key, value):
+        if n is None:
+            return Node(key, value)
+        if key < n.key:
+            n.left = self._insert(n.left, key, value)
+        else:
+            n.right = self._insert(n.right, key, value)
+        return self._rebalance(n)
+
+    # ---- delete ----------------------------------------------------------
+    def delete(self, key):
+        before = self.size
+        self.root = self._delete(self.root, key)
+        return self.size < before
+
+    def _delete(self, n, key):
+        if n is None:
+            return None
+        if key < n.key:
+            n.left = self._delete(n.left, key)
+        elif key > n.key:
+            n.right = self._delete(n.right, key)
+        else:
+            self.size -= 1
+            if n.left is None:
+                return n.right
+            if n.right is None:
+                return n.left
+            succ = n.right                          # in-order successor
+            while succ.left:
+                succ = succ.left
+            n.key, n.value = succ.key, succ.value
+            self.size += 1                          # recursive delete decrements again
+            n.right = self._delete(n.right, succ.key)
+        return self._rebalance(n)
+
+    # ---- searching -------------------------------------------------------
+    def search(self, key):
+        """Exact search. Returns (value or None, comparisons made)."""
+        n, steps = self.root, 0
+        while n:
+            steps += 1
+            if key == n.key:
+                return n.value, steps
+            n = n.left if key < n.key else n.right
+        return None, steps
+
+    def range_query(self, lo, hi):
+        """Ordered range search lo <= key <= hi. Returns (values, nodes visited).
+        Subtrees that cannot contain matches are pruned."""
+        out, visited = [], [0]
+
+        def walk(n):
+            if n is None:
+                return
+            visited[0] += 1
+            if lo < n.key:
+                walk(n.left)
+            if lo <= n.key <= hi:
+                out.append(n.value)
+            if n.key < hi:
+                walk(n.right)
+
+        walk(self.root)
+        return out, visited[0]
+
+    def in_order(self, descending=False):
+        out = []
+
+        def walk(n):
+            if n is None:
+                return
+            first, second = (n.right, n.left) if descending else (n.left, n.right)
+            walk(first)
+            out.append(n.value)
+            walk(second)
+
+        walk(self.root)
+        return out
+
+    def min(self):
+        n = self.root
+        while n and n.left:
+            n = n.left
+        return n.value if n else None
+
+    def max(self):
+        n = self.root
+        while n and n.right:
+            n = n.right
+        return n.value if n else None
+
+    # ---- diagnostics -----------------------------------------------------
+    def height(self):
+        return self._h(self.root)
+
+    def is_balanced(self):
+        def check(n):
+            if n is None:
+                return True
+            return abs(self._bf(n)) <= 1 and check(n.left) and check(n.right)
+        return check(self.root)
+
+    def render(self, fmt=lambda k: str(k)):
+        """Sideways tree: right subtree on top, root at left."""
+        lines = []
+
+        def walk(n, depth):
+            if n is None:
+                return
+            walk(n.right, depth + 1)
+            lines.append(f"{'      ' * depth}{fmt(n.key)} (h={n.height}, bf={self._bf(n):+d})")
+            walk(n.left, depth + 1)
+
+        walk(self.root, 0)
+        return "\n".join(lines) if lines else "(empty tree)"
+
+
+# --------------------------------------------------------------------------
+# Product catalogue: three indexes over the same products
+# --------------------------------------------------------------------------
+class Catalogue:
+    def __init__(self, balanced=True):
+        self.set_mode(balanced)
+
+    def set_mode(self, balanced):
+        """(Re)build the three indexes using AVL (True) or plain BST (False)."""
+        old = self.list_products("id") if hasattr(self, "id_tree") else []
+        self.balanced = balanced
+        mode = "AVL" if balanced else "BST"
+        self.id_tree = AVLTree(f"{mode} by id", balanced)
+        self.name_tree = AVLTree(f"{mode} by name", balanced)
+        self.price_tree = AVLTree(f"{mode} by price", balanced)
+        for p in old:
+            self._index(p)
+
+    def _index(self, p):
+        self.id_tree.insert((p.pid,), p)
+        self.name_tree.insert((p.name.lower(), p.pid), p)
+        self.price_tree.insert((p.price, p.pid), p)
+
+    # ---- operations ------------------------------------------------------
+    def add(self, pid, name, price):
+        if self.id_tree.search((pid,))[0]:
+            raise ValueError(f"Product id {pid} already exists.")
+        p = Product(pid, name.strip(), float(price))
+        self._index(p)
+        return p
+
+    def find_by_id(self, pid):
+        return self.id_tree.search((pid,))
+
+    def find_by_name(self, text):
+        """Exact name matches first; falls back to prefix search. (results, steps)"""
+        t = text.lower()
+        res, steps = self.name_tree.range_query((t, -INF), (t, INF))
+        if res:
+            return res, steps, "exact"
+        res, steps = self.name_tree.range_query((t, -INF), (t + "\uffff", INF))
+        return res, steps, "prefix"
+
+    def find_by_price_range(self, lo, hi):
+        return self.price_tree.range_query((lo, -INF), (hi, INF))
+
+    def update_price(self, pid, new_price):
+        p, _ = self.find_by_id(pid)
+        if not p:
+            return None
+        old = p.price
+        self.price_tree.delete((old, pid))          # remove stale key
+        p.price = float(new_price)
+        self.price_tree.insert((p.price, pid), p)   # re-insert at new position
+        return old, p
+
+    def remove(self, pid):
+        p, _ = self.find_by_id(pid)
+        if not p:
+            return None
+        self.id_tree.delete((pid,))
+        self.name_tree.delete((p.name.lower(), pid))
+        self.price_tree.delete((p.price, pid))
+        return p
+
+    def list_products(self, by="id", descending=False):
+        tree = {"id": self.id_tree, "name": self.name_tree, "price": self.price_tree}[by]
+        return tree.in_order(descending)
+
+    def trees(self):
+        return {"id": self.id_tree, "name": self.name_tree, "price": self.price_tree}
+
+    def __len__(self):
+        return self.id_tree.size
+
+
+# --------------------------------------------------------------------------
+# Presentation helpers
+# --------------------------------------------------------------------------
+SAMPLE = [
+    (105, "Wireless Mouse", 24.99), (101, "Laptop Stand", 39.50),
+    (110, "USB-C Hub", 45.00), (103, "Mechanical Keyboard", 89.99),
+    (108, "Webcam HD", 59.95), (102, "Monitor 27 inch", 249.00),
+    (107, "Noise Cancelling Headphones", 199.99), (104, "Phone Charger", 19.99),
+    (109, "Wireless Earbuds", 79.00), (106, "Laptop Backpack", 49.50),
+    (111, "Smart Watch", 159.00), (112, "Webcam Cover", 4.99),
+]
+
+
+def print_products(items, title=""):
+    if title:
+        print(f"\n{title}")
+    if not items:
+        print("  (no products)")
+        return
+    print("  " + "-" * 46)
+    for p in items:
+        print("  " + str(p))
+    print("  " + "-" * 46)
+    print(f"  {len(items)} product(s)")
+
+
+def tree_stats(cat):
+    print(f"\n  {'Index':<14}{'Nodes':>6}{'Height':>8}{'Ideal':>7}{'Balanced':>10}{'L-rot':>7}{'R-rot':>7}")
+    for name, t in cat.trees().items():
+        ideal = (t.size).bit_length() if t.size else 0
+        print(f"  {t.label:<14}{t.size:>6}{t.height():>8}{ideal:>7}"
+              f"{str(t.is_balanced()):>10}{t.rotations['left']:>7}{t.rotations['right']:>7}")
+    print("  (Ideal = minimum possible height for that many nodes)")
+
+
+def show_tree(cat, which):
+    t = cat.trees()[which]
+    fmt = {"id": lambda k: f"id={k[0]}",
+           "name": lambda k: f"{k[0]}",
+           "price": lambda k: f"${k[0]:.2f}"}[which]
+    print(f"\n  {t.label}  (root at left, right subtree on top)\n")
+    print(t.render(fmt))
+
+
+def balance_demo():
+    """Insert 1..N in sorted order into BST vs AVL: the classic worst case."""
+    n = 31
+    bst, avl = AVLTree("BST", balanced=False), AVLTree("AVL", balanced=True)
+    for i in range(1, n + 1):
+        bst.insert((i,), i)
+        avl.insert((i,), i)
+    print(f"\n=== Balancing demo: inserting ids 1..{n} in sorted order ===")
+    print(f"  Plain BST height : {bst.height():>3}  (degenerates into a linked list, O(n) search)")
+    print(f"  AVL tree height  : {avl.height():>3}  (rotations performed: "
+          f"{avl.rotations['left']} left, {avl.rotations['right']} right)")
+    print(f"  Worst-case comparisons to find id {n}:  BST = {bst.search((n,))[1]},  AVL = {avl.search((n,))[1]}")
+    print(f"  AVL still balanced? {avl.is_balanced()}")
+    small = AVLTree("AVL", True)
+    for i in range(1, 8):
+        small.insert((i,), i)
+    print("\n  AVL tree after inserting 1..7 in order (rotations keep it perfect):\n")
+    print(small.render(lambda k: f"{k[0]}"))
+
+
+def load_sample(cat):
+    added = 0
+    for pid, name, price in SAMPLE:
+        try:
+            cat.add(pid, name, price)
+            added += 1
+        except ValueError:
+            pass
+    return added
+
+
+# --------------------------------------------------------------------------
+# Non-interactive demo
+# --------------------------------------------------------------------------
+def run_demo():
+    cat = Catalogue()
+    print("=" * 60 + "\n ONLINE SHOP PRODUCT SEARCH  -  AVL TREE DEMO\n" + "=" * 60)
+    print(f"\nLoaded {load_sample(cat)} sample products.")
+
+    print_products(cat.list_products("id"), "Sorted by ID (in-order traversal of id tree):")
+    print_products(cat.list_products("name"), "Sorted by name A-Z:")
+    print_products(cat.list_products("price", descending=True), "Sorted by price, high to low:")
+
+    p, steps = cat.find_by_id(108)
+    print(f"\nSearch id 108 -> {p}   [{steps} comparisons among {len(cat)} products]")
+    res, visited, kind = cat.find_by_name("wireless")
+    print_products(res, f"Name search 'wireless' ({kind} match, {visited} nodes visited):")
+    res, visited = cat.find_by_price_range(20, 60)
+    print_products(res, f"Price range $20-$60 (ordered, {visited} nodes visited):")
+    print(f"\nCheapest: {cat.price_tree.min()}\nMost expensive: {cat.price_tree.max()}")
+
+    print("\n--- Update price of #102 Monitor: $249.00 -> $15.00 ---")
+    cat.update_price(102, 15.00)
+    print_products(cat.list_products("price")[:3], "Three cheapest now (monitor moved in price tree):")
+
+    print("\n--- Remove #101 and #105 ---")
+    for pid in (101, 105):
+        print(f"  removed: {cat.remove(pid)}")
+    print_products(cat.list_products("id"), "Catalogue after removals:")
+
+    show_tree(cat, "price")
+    tree_stats(cat)
+    balance_demo()
+
+
+# --------------------------------------------------------------------------
+# Interactive menu
+# --------------------------------------------------------------------------
+MENU = """
+==================== PRODUCT SEARCH (AVL) ====================
+  1. Add product              6. Remove product
+  2. Search by ID             7. List sorted (id / name / price)
+  3. Search by name           8. Show tree structure
+  4. Search by price range    9. Tree statistics
+  5. Update price            10. Balancing demo (BST vs AVL)
+ 11. Load sample data        12. Switch AVL <-> plain BST
+  0. Exit
+==============================================================="""
+
+
+def ask(prompt, cast=str):
+    while True:
+        raw = input(prompt).strip()
+        try:
+            return cast(raw)
+        except ValueError:
+            print("  Invalid input, try again.")
+
+
+def ask_choice(prompt, options):
+    while True:
+        v = input(prompt).strip().lower()
+        if v in options:
+            return v
+        print(f"  Choose one of: {', '.join(options)}")
+
+
+def interactive():
+    cat = Catalogue()
+    while True:
+        print(MENU)
+        print(f"  Mode: {'AVL (self-balancing)' if cat.balanced else 'plain BST (no balancing)'}"
+              f" | Products: {len(cat)}")
+        try:
+            choice = input("  Choose> ").strip()
+        except EOFError:
+            break
+        try:
+            if choice == "1":
+                pid = ask("  Product id (integer): ", int)
+                name = ask("  Name: ")
+                price = ask("  Price: ", float)
+                if not name or price < 0:
+                    print("  Name required and price must be >= 0.")
+                    continue
+                print("  Added:", cat.add(pid, name, price))
+            elif choice == "2":
+                pid = ask("  Id to find: ", int)
+                p, steps = cat.find_by_id(pid)
+                print(f"  {'Found: ' + str(p) if p else 'Not found'}   [{steps} comparisons]")
+            elif choice == "3":
+                text = ask("  Name (full or prefix): ")
+                res, steps, kind = cat.find_by_name(text)
+                print_products(res, f"{kind} match, {steps} nodes visited:")
+            elif choice == "4":
+                lo, hi = ask("  Min price: ", float), ask("  Max price: ", float)
+                res, steps = cat.find_by_price_range(lo, hi)
+                print_products(res, f"Products ${lo:.2f}-${hi:.2f} ({steps} nodes visited):")
+            elif choice == "5":
+                pid = ask("  Id: ", int)
+                new = ask("  New price: ", float)
+                r = cat.update_price(pid, new)
+                print(f"  {r[1].name}: ${r[0]:.2f} -> ${r[1].price:.2f}" if r else "  Not found.")
+            elif choice == "6":
+                p = cat.remove(ask("  Id to remove: ", int))
+                print(f"  Removed: {p}" if p else "  Not found.")
+            elif choice == "7":
+                by = ask_choice("  Sort by (id/name/price): ", ("id", "name", "price"))
+                d = ask_choice("  Order (asc/desc): ", ("asc", "desc")) == "desc"
+                print_products(cat.list_products(by, d), f"Sorted by {by} ({'desc' if d else 'asc'}):")
+            elif choice == "8":
+                show_tree(cat, ask_choice("  Tree (id/name/price): ", ("id", "name", "price")))
+            elif choice == "9":
+                tree_stats(cat)
+            elif choice == "10":
+                balance_demo()
+            elif choice == "11":
+                print(f"  Loaded {load_sample(cat)} new sample products.")
+            elif choice == "12":
+                cat.set_mode(not cat.balanced)
+                print("  Rebuilt indexes as", "AVL." if cat.balanced else "plain BST (try adding sorted ids!).")
+            elif choice == "0":
+                print("  Goodbye!")
+                break
+            else:
+                print("  Unknown option.")
+        except ValueError as e:
+            print("  Error:", e)
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+
+
+if __name__ == "__main__":
+    if "--demo" in sys.argv:
+        run_demo()
+    else:
+        interactive()
