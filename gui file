@@ -1,0 +1,525 @@
+#!/usr/bin/env python3
+"""
+Ghost Goods - a spooky-cute dark GUI for the AVL product search.
+Needs product_search.py in the SAME folder. tkinter ships with Python on Windows.
+Run:  python product_search_gui.py
+"""
+import io
+import math
+import random
+import contextlib
+import tkinter as tk
+from tkinter import ttk, messagebox, font as tkfont
+
+from product_search import Catalogue, load_sample, tree_stats, show_tree, balance_demo
+
+BG, PANEL, PANEL2 = "#0b0e14", "#141922", "#1c2330"
+BORDER, TEXT, MUTED = "#2a3342", "#e6edf3", "#8b98a9"
+BLUE, BLUE_HI, BLUE_DK = "#2457c5", "#3b7bff", "#14264d"
+DANGER, DANGER_HI, ICE = "#3a1d26", "#5a2634", "#dbe7ff"
+CW, CH, MAX_CARDS = 168, 196, 60
+
+# ------------------------------------------------------- product pictures
+# Tiny vector icons on a 100x100 grid: (kind, coords, colour)
+G, D, B, W, L = "#8a97ab", "#2a3342", "#3b7bff", "#e6edf3", "#9ec1ff"
+ICONS = {
+    "mouse": [("o", (30, 15, 70, 85), G), ("l", (50, 15, 50, 46), D), ("r", (47, 22, 53, 36), B)],
+    "keyboard": [("r", (8, 28, 92, 72), D), ("k", (12, 32, 10, 4), G), ("r", (28, 62, 72, 67), B)],
+    "monitor": [("r", (10, 15, 90, 62), D), ("r", (15, 20, 85, 57), B), ("r", (45, 62, 55, 78), G),
+                ("r", (30, 78, 70, 85), G)],
+    "headphones": [("a", (20, 12, 80, 72), G), ("o", (12, 44, 34, 82), B), ("o", (66, 44, 88, 82), B)],
+    "earbuds": [("o", (18, 18, 44, 46), W), ("o", (56, 18, 82, 46), W), ("l", (36, 40, 36, 84), W),
+                ("l", (64, 40, 64, 84), W)],
+    "laptop": [("r", (20, 22, 80, 62), D), ("r", (25, 27, 75, 57), B), ("p", (8, 66, 92, 66, 82, 78, 18, 78), G)],
+    "backpack": [("o", (36, 8, 64, 34), G), ("o", (24, 22, 76, 50), B), ("r", (24, 36, 76, 90), B),
+                 ("r", (34, 60, 66, 84), D), ("l", (34, 52, 66, 52), L)],
+    "hub": [("r", (12, 38, 88, 64), G), ("r", (20, 45, 32, 57), D), ("r", (38, 45, 50, 57), D),
+            ("r", (56, 45, 68, 57), D), ("o", (74, 47, 82, 55), B)],
+    "charger": [("l", (42, 10, 42, 26), G), ("l", (58, 10, 58, 26), G), ("r", (32, 26, 68, 70), W),
+                ("l", (50, 70, 50, 90), G)],
+    "webcam": [("o", (22, 10, 78, 66), D), ("o", (32, 20, 68, 56), G), ("o", (42, 30, 58, 46), B),
+               ("r", (45, 66, 55, 80), G), ("r", (30, 80, 70, 88), G)],
+    "watch": [("r", (38, 6, 62, 94), D), ("r", (26, 26, 74, 74), G), ("r", (32, 32, 68, 68), B),
+              ("l", (50, 50, 50, 38), W), ("l", (50, 50, 60, 50), W)],
+    "box": [("r", (22, 38, 78, 86), B), ("r", (16, 26, 84, 40), L), ("r", (46, 26, 54, 86), W)],
+}
+KEYWORDS = (("backpack", "backpack"), ("keyboard", "keyboard"), ("mouse", "mouse"), ("monitor", "monitor"),
+            ("headphone", "headphones"), ("earbud", "earbuds"), ("hub", "hub"), ("charger", "charger"),
+            ("webcam", "webcam"), ("camera", "webcam"), ("watch", "watch"), ("laptop", "laptop"))
+
+
+def icon_for(name):
+    n = name.lower()
+    return next((icon for key, icon in KEYWORDS if key in n), "box")
+
+
+def draw_icon(c, name, ox, oy, s=1.0, tag="icon"):
+    for kind, co, col in ICONS[name]:
+        if kind == "k":
+            x0, y0, cols, rows = co
+            for r in range(rows):
+                for k in range(cols):
+                    x, y = ox + (x0 + k * 8) * s, oy + (y0 + r * 9) * s
+                    c.create_rectangle(x, y, x + 6 * s, y + 6 * s, fill=col, outline="", tags=tag)
+            continue
+        p = [(ox if i % 2 == 0 else oy) + v * s for i, v in enumerate(co)]
+        if kind == "o":
+            c.create_oval(*p, fill=col, outline="", tags=tag)
+        elif kind == "r":
+            c.create_rectangle(*p, fill=col, outline="", tags=tag)
+        elif kind == "l":
+            c.create_line(*p, fill=col, width=4, capstyle="round", tags=tag)
+        elif kind == "p":
+            c.create_polygon(*p, fill=col, outline="", tags=tag)
+        elif kind == "a":
+            c.create_arc(*p, start=0, extent=180, style="arc", outline=col, width=6, tags=tag)
+
+
+GHOST = [(-40, 50), (-40, -8), (-32, -36), (0, -50), (32, -36), (40, -8), (40, 50), (30, 38), (20, 50),
+         (10, 38), (0, 50), (-10, 38), (-20, 50), (-30, 38)]
+
+
+def draw_ghost(c, cx, cy, s, fill, tags, stipple=""):
+    pts = [v for x, y in GHOST for v in (cx + x * s, cy + y * s)]
+    return c.create_polygon(pts, fill=fill, outline="", smooth=True, stipple=stipple, tags=tags)
+
+
+class Card(tk.Canvas):
+    """One product card: picture, id, name, price. Hover glows, click selects."""
+
+    def __init__(self, app, p):
+        super().__init__(app.inner, width=CW, height=CH, bg=PANEL, highlightthickness=2,
+                         highlightbackground=BORDER, cursor="hand2")
+        self.app, self.p, self.hov = app, p, False
+        self.halo = self.create_oval(34, 10, 134, 110, fill=BLUE_DK, outline="", stipple="gray50")
+        draw_icon(self, icon_for(p.name), 34, 10)
+        f = app.fam
+        self.create_text(10, 8, text=f"#{p.pid}", anchor="nw", fill=MUTED, font=(f, 9, "bold"))
+        self.create_text(CW // 2, 122, text=p.name, width=CW - 18, anchor="n", justify="center",
+                         fill=TEXT, font=(f, 11, "bold"))
+        self.create_text(CW // 2, CH - 8, text=f"${p.price:,.2f}", anchor="s", fill="#7fb0ff",
+                         font=(f, 13, "bold"))
+        for ev, fn in (("<Enter>", self.enter), ("<Leave>", self.leave),
+                       ("<Button-1>", lambda e: app.pick(self)),
+                       ("<Double-Button-1>", lambda e: app.edit(self))):
+            self.bind(ev, fn)
+        self.restyle()
+
+    def enter(self, _):
+        if not self.hov:
+            self.hov = True
+            self.move("icon", 0, -5)
+            self.restyle()
+
+    def leave(self, _):
+        if self.hov:
+            self.hov = False
+            self.move("icon", 0, 5)
+            self.restyle()
+
+    def restyle(self):
+        sel = self.app.selected == self.p.pid
+        self.config(bg="#0f1a33" if sel else PANEL,
+                    highlightbackground=BLUE_HI if (sel or self.hov) else BORDER)
+        self.itemconfig(self.halo, fill=BLUE if (sel or self.hov) else BLUE_DK)
+
+
+class App(tk.Tk):
+    IDLE = "Hover a card, click to pick it, double-click to change its price!"
+
+    def __init__(self):
+        super().__init__()
+        self.title("Ghost Goods - AVL Product Search")
+        self.geometry("1060x780")
+        self.minsize(900, 680)
+        self.configure(bg=BG)
+        try:
+            self.attributes("-alpha", 0.0)
+        except tk.TclError:
+            pass
+        fams = set(tkfont.families())
+        self.fam = next((f for f in ("Ink Free", "Segoe Print", "Chalkboard SE", "Comic Sans MS", "Comic Neue")
+                         if f in fams), "Segoe UI")
+        self.cat = Catalogue()
+        self.v = {k: tk.StringVar() for k in ("id", "name", "price", "s_id", "s_name", "lo", "hi")}
+        self.sort_by, self.order = tk.StringVar(value="id"), tk.StringVar(value="asc")
+        self.status = tk.StringVar()
+        self.selected, self.cards, self.items = None, [], []
+        self.cols, self.gen, self.say_job, self.t, self.n, self.by_prev = 4, 0, None, 0.0, 0, 0.0
+        self.theme()
+        self.build()
+        self.refresh(note="Ready. Click 'Summon sample data' to begin!")
+        self.say("Boo! I'm Gus the ghost. Let's hunt for products!")
+        self.tick()
+        self.fade(self)
+
+    # ------------------------------------------------------------ effects
+    def fade(self, win, a=0.0):
+        try:
+            win.attributes("-alpha", min(a, 1.0))
+            if a < 1:
+                win.after(25, lambda: self.fade(win, a + 0.08))
+        except tk.TclError:
+            pass
+
+    def say(self, msg):
+        self.hc.itemconfig(self.bub_t, text=msg)
+        x0, y0, x1, y1 = self.hc.bbox(self.bub_t)
+        self.hc.coords(self.bub_r, x0 - 12, y0 - 5, x1 + 12, y1 + 5)
+        if self.say_job:
+            self.after_cancel(self.say_job)
+        self.say_job = self.after(4500, lambda: self.say(self.IDLE))
+
+    def tick(self):
+        """Animation loop: floating ghost, following eyes, blinking, drifting ghosts."""
+        try:
+            self.t += 0.1
+            self.n += 1
+            by = 5 * math.sin(self.t)
+            self.hc.move("mascot", 0, by - self.by_prev)
+            self.by_prev = by
+            px = self.winfo_pointerx() - self.hc.winfo_rootx()
+            py = self.winfo_pointery() - self.hc.winfo_rooty()
+            ry = 1.5 if self.n % 100 < 3 else 6
+            for pid, ex in zip(self.eyes, (-13, 13)):
+                cx, cy = 70 + ex, 60 + by
+                vx, vy = px - cx, py - cy
+                dist = math.hypot(vx, vy) or 1
+                k = min(4, dist / 25)
+                ox, oy = vx / dist * k, vy / dist * k
+                self.hc.coords(pid, cx + ox - 6, cy + oy - ry, cx + ox + 6, cy + oy + ry)
+            w = self.hc.winfo_width()
+            for g in self.drift:
+                g["x"] += g["v"]
+                self.hc.move(g["tag"], g["v"], math.sin(self.t + g["ph"]) * 0.6)
+                if g["x"] > w + 40:
+                    self.hc.move(g["tag"], -(w + 80), 0)
+                    g["x"] -= w + 80
+            self.after(40, self.tick)
+        except tk.TclError:
+            pass
+
+    # -------------------------------------------------------------- theme
+    def theme(self):
+        f, fb = (self.fam, 11), (self.fam, 11, "bold")
+        s = ttk.Style(self)
+        s.theme_use("clam")
+        s.configure(".", background=BG, foreground=TEXT, font=f, bordercolor=BORDER,
+                    lightcolor=BORDER, darkcolor=BORDER, troughcolor=PANEL, focuscolor=BG)
+        s.configure("TFrame", background=BG)
+        s.configure("TLabel", background=PANEL, foreground=MUTED)
+        s.configure("Status.TLabel", background=PANEL, foreground="#9ec1ff", padding=(14, 7))
+        s.configure("TLabelframe", background=PANEL, bordercolor=BORDER, relief="solid", borderwidth=1)
+        s.configure("TLabelframe.Label", background=PANEL, foreground=BLUE_HI, font=fb)
+        s.configure("TEntry", fieldbackground=PANEL2, foreground=TEXT, insertcolor=TEXT,
+                    lightcolor=PANEL2, darkcolor=PANEL2, padding=5)
+        s.map("TEntry", bordercolor=[("focus", BLUE_HI)], lightcolor=[("focus", BLUE_HI)],
+              darkcolor=[("focus", BLUE_HI)])
+        s.configure("TCombobox", fieldbackground=PANEL2, background=PANEL2, foreground=TEXT,
+                    arrowcolor=MUTED, lightcolor=PANEL2, darkcolor=PANEL2, padding=4)
+        s.map("TCombobox", fieldbackground=[("readonly", PANEL2)], foreground=[("readonly", TEXT)],
+              bordercolor=[("focus", BLUE_HI)])
+        for k, v in (("background", PANEL2), ("foreground", TEXT), ("selectBackground", BLUE),
+                     ("selectForeground", "#ffffff"), ("font", f)):
+            self.option_add(f"*TCombobox*Listbox.{k}", v)
+        for name, bg, hi in (("TButton", PANEL2, BORDER), ("Accent.TButton", BLUE, BLUE_HI),
+                             ("Danger.TButton", DANGER, DANGER_HI)):
+            s.configure(name, background=bg, foreground=TEXT, lightcolor=bg, darkcolor=bg,
+                        padding=(14, 7), font=fb, focusthickness=0)
+            s.map(name, background=[("pressed", BLUE_DK), ("active", hi)],
+                  lightcolor=[("active", hi)], darkcolor=[("active", hi)])
+        s.configure("Vertical.TScrollbar", background=PANEL2, troughcolor=BG, bordercolor=BG,
+                    arrowcolor=MUTED, lightcolor=PANEL2, darkcolor=PANEL2)
+        s.map("Vertical.TScrollbar", background=[("active", BORDER)])
+
+    # ------------------------------------------------------------- layout
+    def build(self):
+        f, fb = (self.fam, 11), (self.fam, 11, "bold")
+        # animated header: floating ghost, title, speech bubble, drifting see-through ghosts
+        hc = self.hc = tk.Canvas(self, height=132, bg=PANEL, highlightthickness=0)
+        hc.pack(fill="x")
+        self.drift = []
+        for i in range(5):
+            g = {"tag": f"d{i}", "x": random.randint(0, 1000), "v": random.uniform(0.6, 1.6),
+                 "ph": random.uniform(0, 6)}
+            draw_ghost(hc, g["x"], random.randint(30, 105), random.uniform(0.3, 0.55), L, g["tag"], "gray25")
+            self.drift.append(g)
+        hc.create_oval(15, 15, 125, 125, fill=BLUE_HI, outline="", stipple="gray12", tags="mascot")
+        draw_ghost(hc, 70, 72, 1.0, ICE, "mascot")
+        self.eyes = [hc.create_oval(0, 0, 1, 1, fill=BG, outline="") for _ in range(2)]
+        hc.create_oval(64, 70, 76, 84, fill=BG, outline="", tags="mascot")
+        hc.create_text(150, 40, text="Ghost Goods", anchor="w", fill=TEXT, font=(self.fam, 30, "bold"))
+        hc.create_text(153, 76, text="spooky-fast product search with AVL trees", anchor="w",
+                       fill=MUTED, font=(self.fam, 12))
+        self.bub_r = hc.create_rectangle(0, 0, 0, 0, fill=BLUE_DK, outline=BLUE)
+        self.bub_t = hc.create_text(165, 108, text="", anchor="w", fill="#bcd3ff", font=(self.fam, 11))
+        self.bd_r = hc.create_rectangle(0, 0, 0, 0, fill=BLUE_DK, outline=BLUE_HI)
+        self.bd_t = hc.create_text(0, 0, text="", anchor="e", fill="#9ec1ff", font=fb)
+        tk.Frame(self, bg=BLUE, height=2).pack(fill="x")
+
+        body = ttk.Frame(self, padding=(14, 8, 14, 0))
+        body.pack(fill="both", expand=True)
+
+        def card(title):
+            fr = ttk.LabelFrame(body, text=f" {title} ", padding=(10, 6))
+            fr.pack(fill="x", pady=4)
+            return fr
+
+        def entry(fr, label, key, w):
+            ttk.Label(fr, text=label).pack(side="left", padx=(8, 4))
+            e = ttk.Entry(fr, textvariable=self.v[key], width=w, font=f)
+            e.pack(side="left")
+            return e
+
+        fr = card("PRODUCT")
+        entry(fr, "ID", "id", 7)
+        entry(fr, "Name", "name", 24)
+        self.price_entry = entry(fr, "Price", "price", 9)
+        ttk.Button(fr, text="Remove", style="Danger.TButton", command=self.remove).pack(side="right", padx=3)
+        ttk.Button(fr, text="Update price", command=self.update).pack(side="right", padx=3)
+        ttk.Button(fr, text="Add product", style="Accent.TButton", command=self.add).pack(side="right", padx=3)
+
+        fr = card("SEARCH")
+        entry(fr, "ID", "s_id", 6)
+        ttk.Button(fr, text="Find", command=self.search_id).pack(side="left", padx=(6, 12))
+        entry(fr, "Name / prefix", "s_name", 14)
+        ttk.Button(fr, text="Find", command=self.search_name).pack(side="left", padx=(6, 12))
+        entry(fr, "Price", "lo", 7)
+        entry(fr, "to", "hi", 7)
+        ttk.Button(fr, text="Find", command=self.search_price).pack(side="left", padx=6)
+
+        fr = card("SORT")
+        ttk.Label(fr, text="Sort by").pack(side="left", padx=(8, 4))
+        ttk.Combobox(fr, textvariable=self.sort_by, values=("id", "name", "price"), width=7,
+                     state="readonly", font=f).pack(side="left")
+        ttk.Combobox(fr, textvariable=self.order, values=("asc", "desc"), width=5,
+                     state="readonly", font=f).pack(side="left", padx=8)
+        ttk.Button(fr, text="Show all", command=lambda: self.refresh()).pack(side="left", padx=4)
+
+        # scrollable grid of product cards
+        wrap = tk.Frame(body, bg=BORDER, padx=1, pady=1)
+        wrap.pack(fill="both", expand=True, pady=(6, 6))
+        self.gc = tk.Canvas(wrap, bg=BG, highlightthickness=0)
+        sb = ttk.Scrollbar(wrap, orient="vertical", command=self.gc.yview)
+        self.gc.configure(yscrollcommand=sb.set)
+        self.inner = tk.Frame(self.gc, bg=BG)
+        self.gwin = self.gc.create_window((0, 0), window=self.inner, anchor="nw")
+        self.gc.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+        self.inner.bind("<Configure>", lambda e: self.gc.configure(scrollregion=self.gc.bbox("all")))
+        self.gc.bind("<Configure>", lambda e: self.relayout())
+        self.bind_all("<MouseWheel>", lambda e: self.gc.yview_scroll(-int(e.delta / 120), "units")
+                      if e.widget.winfo_toplevel() is self else None)
+        self.empty = tk.Label(self.inner, text="Boo! Nothing here...", bg=BG, fg=MUTED, font=(self.fam, 16))
+
+        bar = ttk.Frame(body)
+        bar.pack(fill="x", pady=(0, 8))
+        for text, cmd in (("Summon sample data", self.load), ("Show tree", self.show_tree),
+                          ("Tree statistics", self.stats), ("Balancing demo", self.demo)):
+            ttk.Button(bar, text=text, command=cmd).pack(side="left", padx=(0, 6))
+        self.mode_btn = ttk.Button(bar, text="Switch to plain BST", style="Accent.TButton", command=self.toggle)
+        self.mode_btn.pack(side="right")
+        tk.Frame(self, bg=BORDER, height=1).pack(fill="x")
+        ttk.Label(self, textvariable=self.status, style="Status.TLabel", anchor="w").pack(fill="x")
+
+    # ------------------------------------------------------------ helpers
+    def set_badge(self):
+        w = self.hc.winfo_width()
+        w = w if w > 50 else 1000
+        self.hc.itemconfig(self.bd_t, text=f"{'AVL' if self.cat.balanced else 'plain BST'}  |  "
+                                           f"{len(self.cat)} products")
+        self.hc.coords(self.bd_t, w - 32, 34)
+        x0, y0, x1, y1 = self.hc.bbox(self.bd_t)
+        self.hc.coords(self.bd_r, x0 - 12, y0 - 6, x1 + 12, y1 + 6)
+
+    def relayout(self):
+        w = self.gc.winfo_width()
+        self.cols = max(1, w // (CW + 14)) if w > 50 else 4
+        self.gc.itemconfig(self.gwin, width=max(w, 1))
+        for i in range(40):
+            self.inner.grid_columnconfigure(i, weight=1 if i < self.cols else 0)
+        for i, c in enumerate(self.cards):
+            c.grid(row=i // self.cols, column=i % self.cols, padx=7, pady=7)
+        self.set_badge()
+
+    def refresh(self, items=None, note=None):
+        if items is None:
+            items = self.cat.list_products(self.sort_by.get(), self.order.get() == "desc")
+            note = note or f"{len(items)} products, sorted by {self.sort_by.get()} ({self.order.get()})"
+        if len(items) > MAX_CARDS:
+            note = f"{note or ''}  (showing first {MAX_CARDS})"
+            items = items[:MAX_CARDS]
+        self.status.set(note or f"{len(items)} result(s)")
+        self.gen += 1
+        for c in self.cards:
+            c.destroy()
+        self.cards, self.items = [], items
+        self.empty.grid_forget()
+        if not items:
+            self.empty.grid(row=0, column=0, columnspan=40, pady=60)
+        self.set_badge()
+        self.gc.yview_moveto(0)
+        self.spawn(self.gen, 0)
+
+    def spawn(self, gen, i):
+        """Cards pop in one by one (a little ghostly reveal)."""
+        if gen != self.gen:
+            return
+        step = 1 if len(self.items) <= 30 else len(self.items)
+        for p in self.items[i:i + step]:
+            c = Card(self, p)
+            self.cards.append(c)
+            n = len(self.cards) - 1
+            c.grid(row=n // self.cols, column=n % self.cols, padx=7, pady=7)
+        if i + step < len(self.items):
+            self.after(35, lambda: self.spawn(gen, i + step))
+
+    def pick(self, card):
+        p = card.p
+        self.selected = p.pid
+        self.v["id"].set(p.pid)
+        self.v["name"].set(p.name)
+        self.v["price"].set(f"{p.price:.2f}")
+        for c in self.cards:
+            c.restyle()
+        self.say(f"{p.name}? Ooooh, great taste!")
+
+    def edit(self, card):
+        self.pick(card)
+        self.price_entry.focus_set()
+        self.price_entry.select_range(0, "end")
+        self.say("Type a new price, then press 'Update price'.")
+
+    def num(self, key, cast, label):
+        try:
+            return cast(self.v[key].get().strip())
+        except ValueError:
+            self.say("Hmm, that doesn't look right...")
+            messagebox.showerror("Invalid input", f"Please enter a valid {label}.")
+            raise
+
+    def popup(self, title, func, *args):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            func(*args)
+        win = tk.Toplevel(self)
+        win.title(title)
+        win.geometry("800x560")
+        win.configure(bg=BG)
+        try:
+            win.attributes("-alpha", 0.0)
+        except tk.TclError:
+            pass
+        hdr = tk.Canvas(win, height=58, bg=PANEL, highlightthickness=0)
+        hdr.pack(fill="x")
+        draw_ghost(hdr, 38, 33, 0.38, ICE, "g")
+        hdr.create_oval(30, 25, 36, 33, fill=BG, outline="")
+        hdr.create_oval(41, 25, 47, 33, fill=BG, outline="")
+        hdr.create_text(70, 29, text=title, anchor="w", fill=TEXT, font=(self.fam, 16, "bold"))
+        frame = tk.Frame(win, bg=BG)
+        frame.pack(fill="both", expand=True, padx=12, pady=12)
+        txt = tk.Text(frame, font=("Consolas", 10), wrap="none", bg=PANEL, fg="#c9d7ee", relief="flat",
+                      padx=12, pady=10, insertbackground=TEXT, selectbackground=BLUE_DK,
+                      highlightthickness=1, highlightbackground=BORDER, highlightcolor=BORDER)
+        sb = ttk.Scrollbar(frame, orient="vertical", command=txt.yview)
+        txt.configure(yscrollcommand=sb.set)
+        txt.insert("1.0", buf.getvalue())
+        txt.config(state="disabled")
+        txt.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+        self.fade(win)
+
+    # ------------------------------------------------------------ actions
+    def add(self):
+        try:
+            pid, price = self.num("id", int, "integer ID"), self.num("price", float, "price")
+        except ValueError:
+            return
+        name = self.v["name"].get().strip()
+        if not name or price < 0:
+            return messagebox.showerror("Invalid input", "Name is required and price must be >= 0.")
+        try:
+            self.cat.add(pid, name, price)
+        except ValueError as e:
+            self.say("Oops, that ID is taken!")
+            return messagebox.showerror("Cannot add", str(e))
+        self.selected = pid
+        self.refresh(note=f"Added #{pid} {name}. Trees rebalanced as needed.")
+        self.say(f"Yay! {name} joined the shop!")
+
+    def update(self):
+        try:
+            pid, price = self.num("id", int, "integer ID"), self.num("price", float, "price")
+        except ValueError:
+            return
+        r = self.cat.update_price(pid, price)
+        if not r:
+            self.say("Boo... no product with that ID.")
+            return messagebox.showinfo("Not found", f"No product with id {pid}.")
+        self.refresh(note=f"{r[1].name}: ${r[0]:.2f} -> ${r[1].price:.2f} (moved in price tree)")
+        self.say("Price changed. Sneaky!")
+
+    def remove(self):
+        try:
+            pid = self.num("id", int, "integer ID")
+        except ValueError:
+            return
+        p = self.cat.remove(pid)
+        if not p:
+            self.say("Boo... no product with that ID.")
+            return messagebox.showinfo("Not found", f"No product with id {pid}.")
+        self.selected = None
+        self.refresh(note=f"Removed #{p.pid} {p.name}")
+        self.say(f"Poof! {p.name} vanished like a ghost.")
+
+    def search_id(self):
+        try:
+            pid = self.num("s_id", int, "integer ID")
+        except ValueError:
+            return
+        p, steps = self.cat.find_by_id(pid)
+        self.refresh([p] if p else [], f"ID search: {'found' if p else 'not found'} in {steps} "
+                                       f"comparisons ({len(self.cat)} products)")
+        self.say(f"Found it in just {steps} steps!" if p else "Boo... couldn't find that one.")
+
+    def search_name(self):
+        res, steps, kind = self.cat.find_by_name(self.v["s_name"].get().strip())
+        self.refresh(res, f"Name search ({kind} match): {len(res)} result(s), {steps} nodes visited")
+        self.say(f"{len(res)} spooky match(es)!" if res else "Nothing by that name...")
+
+    def search_price(self):
+        try:
+            lo = float(self.v["lo"].get() or 0)
+            hi = float(self.v["hi"].get() or 1e12)
+        except ValueError:
+            return messagebox.showerror("Invalid input", "Price limits must be numbers.")
+        res, steps = self.cat.find_by_price_range(lo, hi)
+        self.refresh(res, f"Price range ${lo:.2f}-${hi:,.2f}: {len(res)} result(s), {steps} nodes visited")
+        self.say(f"Skipped whole branches: only {steps} nodes visited!")
+
+    def load(self):
+        n = load_sample(self.cat)
+        self.refresh(note=f"Loaded {n} sample products")
+        self.say("Sample products summoned!")
+
+    def show_tree(self):
+        self.popup(f"Tree structure: {self.sort_by.get()} index", show_tree, self.cat, self.sort_by.get())
+        self.say("This is what the tree looks like inside.")
+
+    def stats(self):
+        self.popup("Tree statistics", tree_stats, self.cat)
+
+    def demo(self):
+        self.popup("Balancing demo: BST vs AVL", balance_demo)
+        self.say("AVL rotations keep the tree short and speedy!")
+
+    def toggle(self):
+        self.cat.set_mode(not self.cat.balanced)
+        self.mode_btn.config(text="Switch to plain BST" if self.cat.balanced else "Switch to AVL")
+        self.refresh(note="Indexes rebuilt as " + ("AVL." if self.cat.balanced else
+                                                   "plain BST. Add sorted IDs, then check Tree statistics."))
+        self.say("Balanced again!" if self.cat.balanced else "Eek, no balancing now. Wobbly tree!")
+
+
+if __name__ == "__main__":
+    App().mainloop()
